@@ -74,3 +74,35 @@ Get-Content checksums.txt | ForEach-Object {
 A matching command prints `OK` for each file. A mismatch prints a checksum error and a non-zero exit status.
 
 The indexer entry in `manifest.json` uses `digest` (`sha256:...`) rather than a filename. Compare that value to `containerimage.digest` in the "Build indexer image and record its digest" log of the release workflow. That digest is the image built for the release; it is not a GHCR pull digest, because this repository does not push the indexer image.
+## Post-publish verification (#1046)
+
+The release manifest above verifies the artifacts attached to a GitHub Release.
+This section covers the other half: proving that what reached **npm** is
+installable, because a successful `npm publish` does not prove the registry
+artifact is installable or that its declarations resolve.
+
+`release.yml` reads the version from the Changesets output and calls
+[`.github/workflows/verify-react-release.yml`](../.github/workflows/verify-react-release.yml),
+which runs `scripts/verify-published-react.mjs`. That script creates a throwaway
+project outside this repository, installs `<name>@<published version>` from npm
+(retried to ride out registry propagation), and then:
+
+1. asserts the installed version is exactly the published one,
+2. `require()`s the CommonJS entry and `import()`s the ESM entry,
+3. renders a published component with `react-dom/server`,
+4. type-checks a consumer component against the published `dist/index.d.ts`.
+
+The job is skipped when a release does not publish `@bc-forge/react`, and it can
+be dispatched by hand from the **Actions** tab to re-verify a version that has
+already shipped.
+
+Run the same check locally:
+
+```bash
+npm run verify:published -- --version 1.0.0   # one exact version
+npm run verify:published                      # latest published version
+```
+
+If it fails, the published version stays on npm: the script never unpublishes.
+Add a changeset, let the release workflow ship a fixed version, and re-run the
+verification.
