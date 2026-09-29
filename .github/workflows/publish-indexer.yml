@@ -1,0 +1,184 @@
+name: Publish indexer image
+
+# Builds indexer/Dockerfile and publishes a multi-architecture image to the
+# GitHub Container Registry as soon as an indexer release tag lands.
+# Component tags for the sdk, cli, and react packages (sdk-v*, cli-v*,
+# react-v*) do not match this filter, so they never push an image.
+#
+# Tag convention: indexer-v<semver>, e.g. indexer-v1.2.3 or indexer-v1.2.3-rc.1
+#
+# Issue #1049: the image is built with Docker Buildx for linux/amd64 and
+# linux/arm64 under one manifest list. A manifest inspection step asserts both
+# platforms are present, and a smoke-test step starts the Node process on
+# each architecture.
+on:
+  push:
+    tags:
+      - 'indexer-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (defaults to indexer/package.json version)'
+        required: false
+        type: string
+
+# Only `packages: write` is needed to push to GHCR. `contents: read` is the
+# minimum required to check out the repository. No other scopes are granted
+# and no repository secrets are referenced: authentication uses the automatic
+# GITHUB_TOKEN.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: bcpathway/bc-forge-indexer
+  TAG_PREFIX: indexer-v
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    name: Build and push indexer image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tags
+        id: meta
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+            version="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF_TYPE:-}" == "tag" || "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            git_tag="${GITHUB_REF_NAME}"
+            if [[ "$git_tag" != "${TAG_PREFIX}"* ]]; then
+              echo "::error::Unexpected tag ${git_tag}; expected ${TAG_PREFIX}<semver>."
+              exit 1
+            fi
+            # e.g. 1.2.3, 1.2.3-rc.1
+            version="${git_tag#${TAG_PREFIX}}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="$(node -p "require('./indexer/package.json').version")"
+          else
+            echo "::error::This workflow only publishes on ${TAG_PREFIX}* tags (or manual dispatch)."
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version ${version} is not semantic."
+            exit 1
+          fi
+
+          # A semver prerelease carries a hyphen in its core-to-pre tag segment.
+          if [[ "$version" == *-* ]]; then
+            is_prerelease=true
+          else
+            is_prerelease=false
+          fi
+
+          tags="${REGISTRY}/${IMAGE_NAME}:${version}"
+          tags="${tags},${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+          # `latest` tracks stable releases only; a prerelease must never take
+          # over the channel default.
+          if [[ "$is_prerelease" == "false" ]]; then
+            tags="${tags},${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
+
+          {
+            echo "version=${version}"
+            echo "is_prerelease=${is_prerelease}"
+            echo "tags=${tags}"
+            # Tag pushes carry no head_commit, so stamp the build here.
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Publishing ${REGISTRY}/${IMAGE_NAME}:${version} (prerelease=${is_prerelease})"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./indexer/Dockerfile
+          push: true
+          platforms: ${{ env.PLATFORMS }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}"
+          echo "Inspecting ${IMAGE} for ${PLATFORMS}..."
+          docker buildx imagetools inspect "${IMAGE}" --raw | tee /tmp/manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = Path("/tmp/manifest.json").read_text(encoding="utf-8")
+          data = json.loads(raw)
+
+          # `docker buildx imagetools inspect --raw` returns an OCI image index
+          # (or a Docker manifest list) with a `manifests` array; each entry
+          # carries a `platform` object with `architecture` and `os`.
+          manifests = data.get("manifests")
+          if not isinstance(manifests, list) or not manifests:
+              raise SystemExit(f"no manifests array in image index: {raw[:2000]}")
+
+          arches = set()
+          for entry in manifests:
+              platform = entry.get("platform", {})
+              arch = platform.get("architecture")
+              os_ = platform.get("os")
+              if arch and os_:
+                  arches.add(f"{os_}/{arch}")
+
+          print(f"platforms found: {sorted(arches)}")
+          missing = {"linux/amd64", "linux/arm64"} - arches
+          if missing:
+              raise SystemExit(f"missing platforms in published manifest: {sorted(missing)}")
+          print("multi-arch manifest OK: linux/amd64 and linux/arm64 present")
+          PY
+
+      - name: Smoke-test image (amd64/arm64)
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}"
+          for platform in linux/amd64 linux/arm64; do
+            echo "--- ${platform}: node --version ---"
+            docker run --rm --platform "${platform}" "${IMAGE}" node --version
+            echo "--- ${platform}: node process starts ---"
+            docker run --rm --platform "${platform}" "${IMAGE}" node -e "console.log('node ok', process.arch, process.version)"
+          done
+
+      - name: Summarize published tags
+        run: |
+          {
+            echo "### Indexer image published"
+            echo ""
+            echo "- Image: \`${REGISTRY}/${IMAGE_NAME}\`"
+            echo "- Version: \`${{ steps.meta.outputs.version }}\`"
+            echo "- Prerelease: \`${{ steps.meta.outputs.is_prerelease }}\`"
+            echo "- Platforms: \`${PLATFORMS}\`"
+            echo "- Tags: \`${{ steps.meta.outputs.tags }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
