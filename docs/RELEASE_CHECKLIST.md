@@ -1,17 +1,82 @@
 # Release checklist
 
-`@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react` publish from
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) on a push to
-`main`. Changesets opens the version PR, and the publish step builds each
-package, sets `npm config set provenance true`, and runs `npx changeset publish`.
+## Component-specific tag-based publishing
 
-The workflow grants `id-token: write` so npm can verify the GitHub Actions OIDC
-token. It does not pass `NODE_AUTH_TOKEN`. A long-lived npm token is not part of
+Each package publishes independently when a matching tag is pushed:
+
+| Package | Tag Pattern | Workflow |
+|---------|-------------|----------|
+| `@bc-forge/sdk` | `sdk-v*` | [`.github/workflows/publish-sdk.yml`](../.github/workflows/publish-sdk.yml) |
+| `@bc-forge/cli` | `cli-v*` | [`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) |
+| `@bc-forge/react` | `react-v*` | [`.github/workflows/publish-react.yml`](../.github/workflows/publish-react.yml) |
+| `@bc-forge/indexer` | `indexer-v*` | [`.github/workflows/publish-indexer.yml`](../.github/workflows/publish-indexer.yml) |
+
+All component workflows use the reusable workflow [`.github/workflows/publish-package.yml`](../.github/workflows/publish-package.yml) which:
+- Validates the tag matches the expected prefix
+- Installs dependencies with `npm ci`
+- Runs the package-specific build and test commands
+- Validates tarball contents with `npm run test:tarball`
+- Publishes to npm using OIDC trusted publishing (falls back to `NPM_TOKEN` secret if needed)
+- Sets `npm config set provenance true` for provenance attestations
+
+### Tag format
+
+Tags must follow the pattern `<component>-v<version>` where:
+- `<component>` is one of: `sdk`, `cli`, `react`, `indexer`
+- `<version>` is a valid semver version (e.g., `1.0.0`, `1.2.3-beta.1`)
+
+Examples:
+- `sdk-v1.0.0`
+- `cli-v2.1.0`
+- `react-v1.0.0-beta.1`
+- `indexer-v0.5.0`
+
+### Release process
+
+1. Ensure all changes for the component are merged to `main`
+2. Update the version in the component's `package.json`
+3. Create and push the tag:
+   ```bash
+   git tag sdk-v1.0.0
+   git push origin sdk-v1.0.0
+   ```
+4. The corresponding workflow will trigger automatically
+5. Verify the publish succeeded in GitHub Actions and on npm
+
+### Testing tag patterns locally
+
+Run the tag validation script to verify a tag maps to exactly one component:
+
+```bash
+node scripts/validate-tag.js sdk-v1.0.0
+# Output: sdk
+
+node scripts/validate-tag.js cli-v2.0.0
+# Output: cli
+
+node scripts/validate-tag.js v1.0.0
+# Output: (none - no match)
+
+node scripts/validate-tag.js sdk-v1.0.0 cli-v2.0.0
+# Output: ERROR: Multiple components matched
+```
+
+## Legacy Changesets publishing (deprecated)
+
+> **Note:** The following describes the previous Changesets-based workflow which is being phased out in favor of component-specific tag publishing.
+
+`@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react` previously published from
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) on a push to
+`main`. Changesets opened the version PR, and the publish step built each
+package, set `npm config set provenance true`, and ran `npx changeset publish`.
+
+The workflow granted `id-token: write` so npm could verify the GitHub Actions OIDC
+token. It did not pass `NODE_AUTH_TOKEN`. A long-lived npm token was not part of
 the normal publish path.
 
-## One-time npm trusted-publisher setup
+### One-time npm trusted-publisher setup
 
-Do this once per package (`@bc-forge/sdk`, `@bc-forge/cli`, `@bc-forge/react`)
+Do this once per package (`@bc-forge/sdk`, `@bc-forge/cli`, `@bc-forge/react`, `@bc-forge/indexer`)
 in the npm organization that owns the scope:
 
 1. Sign in to [npmjs.com](https://www.npmjs.com) as an owner of the `bc-forge` organization.
@@ -19,21 +84,21 @@ in the npm organization that owns the scope:
 3. Add a GitHub Actions publisher:
    - Organization or user: `BCPathway`
    - Repository: `bc-forge`
-   - Workflow filename: `release.yml`
+   - Workflow filename: `publish-sdk.yml` (or `publish-cli.yml`, `publish-react.yml`, `publish-indexer.yml`)
    - Environment name: leave empty unless a GitHub Environment is added to the release job later
-4. Save. Repeat for the other two packages.
+4. Save. Repeat for the other packages.
 5. Confirm **Access** is public for each package. The changesets config sets `"access": "public"`.
-6. After the next release, open the package's **Versions** page and confirm the version shows a provenance attestation. The statement is also linked from the GitHub Actions run of `Release packages`.
+6. After the next release, open the package's **Versions** page and confirm the version shows a provenance attestation. The statement is also linked from the GitHub Actions run of the component publish workflow.
 
-Provenance is requested by `npm config set provenance true` before `changeset publish`. Pull requests do not publish.
+Provenance is requested by `npm config set provenance true` before `npm publish`. Pull requests do not publish.
 
 ## Fallback secret and rotation
 
 Use a granular npm token only when trusted publishing is unavailable (for example, the publisher record has not been created yet).
 
-1. On npm, create a **granular access token** that can publish only `@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react`. Do not create a classic token with access to every package you own.
+1. On npm, create a **granular access token** that can publish only `@bc-forge/sdk`, `@bc-forge/cli`, `@bc-forge/react`, and `@bc-forge/indexer`. Do not create a classic token with access to every package you own.
 2. Store it as the `NPM_TOKEN` Actions secret on `BCPathway/bc-forge`.
-3. In `.github/workflows/release.yml`, add `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` to the Changesets step, publish the pending release, then remove that line so later releases go back to OIDC.
+3. The reusable workflow accepts `NPM_TOKEN` as an optional secret for fallback publishing.
 4. Rotate the secret after that publish, and after any exposure:
    - Revoke the token on npm (**Access Tokens → Revoke**).
    - Create a replacement granular token with the same package list.

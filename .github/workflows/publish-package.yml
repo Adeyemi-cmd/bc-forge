@@ -1,0 +1,114 @@
+name: Publish Package (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-dir:
+        description: "Directory of the package to publish (e.g., sdk, cli, react, indexer)"
+        required: true
+        type: string
+      package-name:
+        description: "npm package name (e.g., @bc-forge/sdk)"
+        required: true
+        type: string
+      build-command:
+        description: "Build command to run before publishing"
+        required: true
+        type: string
+      test-command:
+        description: "Test command to run before publishing"
+        required: true
+        type: string
+      tag-prefix:
+        description: "Tag prefix that triggers this workflow (e.g., sdk-v)"
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        description: "Optional npm token for fallback publishing"
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate-tag:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    outputs:
+      should-publish: ${{ steps.check.outputs.should-publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tag matches prefix
+        id: check
+        run: |
+          TAG="${{ github.ref_name }}"
+          PREFIX="${{ inputs.tag-prefix }}"
+          if [[ "$TAG" == "$PREFIX"* ]]; then
+            VERSION="${TAG#$PREFIX}"
+            echo "should-publish=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "Tag $TAG matches prefix $PREFIX, version: $VERSION"
+          else
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not match prefix $PREFIX, skipping publish"
+          fi
+
+  publish:
+    name: Build, Test, and Publish
+    needs: validate-tag
+    if: needs.validate-tag.outputs.should-publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
+
+      - name: Test package
+        run: ${{ inputs.test-command }}
+
+      - name: Validate package contents
+        run: npm run test:tarball --workspace ${{ inputs.package-name }}
+
+      - name: Publish to npm
+        if: env.NPM_TOKEN == ''
+        run: |
+          npm config set provenance true
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: ${{ inputs.package-dir }}
+
+      - name: Publish to npm (with token fallback)
+        if: env.NPM_TOKEN != ''
+        run: |
+          npm config set provenance true
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: ${{ inputs.package-dir }}

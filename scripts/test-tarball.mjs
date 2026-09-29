@@ -44,12 +44,7 @@ for (const [name, dir] of Object.entries(dirs)) {
   try {
     run("npm init -y", consumer);
     run(`npm install "${tarball}"`, consumer);
-    const importCheck = `
-      import("${name}").then(() => process.exit(0)).catch((err) => {
-        console.error(err);
-        process.exit(1);
-      });
-    `;
+    const importCheck = `import("${name}").then(() => process.exit(0)).catch((err) => { console.error(err); process.exit(1); });`;
     execSync(`node --input-type=module -e ${JSON.stringify(importCheck)}`, {
       cwd: consumer,
       stdio: "inherit",

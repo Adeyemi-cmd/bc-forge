@@ -1,0 +1,18 @@
+name: Publish SDK
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+
+jobs:
+  publish:
+    uses: ./.github/workflows/publish-package.yml
+    with:
+      package-dir: sdk
+      package-name: "@bc-forge/sdk"
+      build-command: npm run build --workspace @bc-forge/sdk
+      test-command: npm test --workspace @bc-forge/sdk
+      tag-prefix: "sdk-v"
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

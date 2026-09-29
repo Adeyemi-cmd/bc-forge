@@ -1,0 +1,18 @@
+name: Publish React
+
+on:
+  push:
+    tags:
+      - "react-v*"
+
+jobs:
+  publish:
+    uses: ./.github/workflows/publish-package.yml
+    with:
+      package-dir: react
+      package-name: "@bc-forge/react"
+      build-command: npm run build --workspace @bc-forge/react
+      test-command: npm test --workspace @bc-forge/react
+      tag-prefix: "react-v"
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
