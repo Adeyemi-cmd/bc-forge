@@ -82,7 +82,9 @@ no paid alerting client or service integration is required.
 ## API authentication
 
 The indexer read API (`/api/v1/mints`, `/api/v1/transfers`, `/api/v1/burns`,
-`/api/v1/holders`, `/api/v1/supply-history`, `/api/v1/stats`) is protected by a
+`/api/v1/vault-deposits`, `/api/v1/wrapper-updates`, `/api/v1/vesting-claims`,
+`/api/v1/split-distributions`, `/api/v1/holders`, `/api/v1/supply-history`,
+`/api/v1/stats`) is protected by a
 shared secret. Set it in the environment (dotenv loads `.env` automatically)
 and send it on every request as a bearer token:
 
@@ -99,6 +101,29 @@ Requests with a missing or incorrect token receive HTTP `401` with
 `{ "error": "Unauthorized" }`. The token value is never logged. `GET /health`
 is registered outside the authenticated router and stays public so uptime
 probes keep working.
+
+## Vault, wrapper, vesting, and split events
+
+These families are decoded from the contract topics below and listed with the
+same cursor pagination as `/api/v1/mints`. Each stored row has a unique
+`txHash`.
+
+| Family | Route | Contract topic | Data tuple |
+| --- | --- | --- | --- |
+| Vault deposits | `GET /api/v1/vault-deposits` | `deposit` | Yield vault: `(caller, assets, shares)`. Wrapper: `(caller, assets, shares, version)`; the trailing schema version is ignored. |
+| Wrapper updates | `GET /api/v1/wrapper-updates` | `wrap`, `unwrap` | `wrap`: `(caller, amount, wrapped_amount)`. `unwrap`: `(caller, wrapped_amount, underlying_amount)`. |
+| Vesting claims | `GET /api/v1/vesting-claims` | `v_rel` | `(beneficiary, amount)` |
+| Split distributions | `GET /api/v1/split-distributions` | `pyo_succ` | `(invoice_id, recipient, amount)` |
+
+An optional `address` filter matches `caller` on deposits and wrapper updates,
+`beneficiary` on vesting claims, and `recipient` on split distributions.
+
+### Rate-limit events are not indexed
+
+`contracts/rate-limit` (`BcForgeRateLimit`) does not publish contract events.
+`check_rate_limit`, `set_global_rate_limit`, and `set_address_rate_limit` only
+read and write instance storage. There is no topic to decode, so the indexer
+does not store a rate-limit family and does not expose a list route for it.
 
 ## Holder & supply aggregates
 
@@ -128,7 +153,18 @@ failures are logged server-side with credentials scrubbed.
 Build the production Docker container from the root directory:
 
 ```bash
-docker build -f indexer/Dockerfile -t bc-forge-indexer indexer
+docker build -f indexer/Dockerfile -t bc-forge-indexer .
+```
+
+The build context must be the repository root (not `indexer/`) because
+`@bc-forge/indexer` depends on the `@bc-forge/sdk` workspace, which is
+resolved via the root lockfile rather than the npm registry.
+
+For a multi-architecture build (linux/amd64 + linux/arm64 under one
+manifest list, as published by `.github/workflows/publish-indexer.yml`):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -f indexer/Dockerfile -t bc-forge-indexer .
 ```
 
 ### Running the Container
