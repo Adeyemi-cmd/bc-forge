@@ -230,6 +230,13 @@ with npm provenance (`id-token: write`). Changesets publishes a package when
 that package's version is new. An SDK or CLI release that does not bump
 `react/package.json` does not publish React. There is one publish job.
 
+A stable React version publishes as the npm `latest` dist-tag. A version
+`X.Y.Z-beta.N` or `X.Y.Z-rc.N` (tag form `react-vX.Y.Z-beta.N` or
+`react-vX.Y.Z-rc.N`) is published in that same job on the `beta` or `rc`
+dist-tag, and Changesets then skips it so `latest` stays on the stable
+release. Any other prerelease identifier fails the release. Install commands
+are in [`react/README.md`](react/README.md).
+
 Request a Changesets release with `npm run changeset` and name `@bc-forge/react`
 when the React package should ship from `main`.
 
