@@ -7,9 +7,9 @@
  */
 
 const COMPONENTS = [
-  { name: "sdk", prefix: "sdk-v", workflow: "publish-sdk.yml" },
-  { name: "cli", prefix: "cli-v", workflow: "publish-cli.yml" },
-  { name: "react", prefix: "react-v", workflow: "publish-react.yml" },
+  { name: "sdk", prefix: "sdk-v", workflow: "release.yml" },
+  { name: "cli", prefix: "cli-v", workflow: "release.yml" },
+  { name: "react", prefix: "react-v", workflow: "release.yml" },
   { name: "indexer", prefix: "indexer-v", workflow: "publish-indexer.yml" },
 ];
 

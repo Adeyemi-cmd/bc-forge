@@ -132,7 +132,6 @@ jobs:
 
       - name: Publish to npm
         if: ${{ !inputs.dry-run }}
-        working-directory: ${{ inputs.package-dir }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -141,9 +140,8 @@ jobs:
             unset NODE_AUTH_TOKEN
           fi
           npm config set provenance true
-          npm publish --access public --provenance
+          npm publish --workspace "${{ inputs.package-name }}" --access public --provenance
 
       - name: Demonstrate publish without writing to the registry
         if: ${{ inputs.dry-run }}
-        working-directory: ${{ inputs.package-dir }}
-        run: npm publish --dry-run --access public
+        run: npm publish --workspace "${{ inputs.package-name }}" --dry-run --access public

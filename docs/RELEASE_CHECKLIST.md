@@ -1,83 +1,17 @@
 # Release checklist
 
-## Component-specific tag-based publishing
-
-Each package publishes independently when a matching tag is pushed:
-
-| Package | Tag Pattern | Workflow |
-|---------|-------------|----------|
-| `@bc-forge/sdk` | `sdk-v*` | [`.github/workflows/publish-sdk.yml`](../.github/workflows/publish-sdk.yml) |
-| `@bc-forge/cli` | `cli-v*` | [`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) |
-| `@bc-forge/react` | `react-v*` | [`.github/workflows/publish-react.yml`](../.github/workflows/publish-react.yml) |
-| `@bc-forge/indexer` | `indexer-v*` | [`.github/workflows/publish-indexer.yml`](../.github/workflows/publish-indexer.yml) |
-
-All component workflows use the reusable workflow [`.github/workflows/publish-package.yml`](../.github/workflows/publish-package.yml) which:
-- Validates the tag matches the expected prefix
-- Installs dependencies with `npm ci`
-- Runs the package-specific build and test commands
-- Validates tarball contents with `npm run test:tarball`
-- Publishes to npm using OIDC trusted publishing (falls back to `NPM_TOKEN` secret if needed)
-- Sets `npm config set provenance true` for provenance attestations
-
-A non-publishing demonstration is [`.github/workflows/publish-dry-run.yml`](../.github/workflows/publish-dry-run.yml). Running it with `workflow_dispatch` calls the reusable workflow with `dry-run: true`, which installs, builds, tests, checks the tarball, and runs `npm publish --dry-run` without writing to the registry.
-
-### Tag format
-
-Tags must follow the pattern `<component>-v<version>` where:
-- `<component>` is one of: `sdk`, `cli`, `react`, `indexer`
-- `<version>` is a valid semver version (e.g., `1.0.0`, `1.2.3-beta.1`)
-
-Examples:
-- `sdk-v1.0.0`
-- `cli-v2.1.0`
-- `react-v1.0.0-beta.1`
-- `indexer-v0.5.0`
-
-### Release process
-
-1. Ensure all changes for the component are merged to `main`
-2. Update the version in the component's `package.json`
-3. Create and push the tag:
-   ```bash
-   git tag sdk-v1.0.0
-   git push origin sdk-v1.0.0
-   ```
-4. The corresponding workflow will trigger automatically
-5. Verify the publish succeeded in GitHub Actions and on npm
-
-### Testing tag patterns locally
-
-Run the tag validation script to verify a tag maps to exactly one component:
-
-```bash
-node scripts/validate-tag.js sdk-v1.0.0
-# sdk-v1.0.0 -> sdk (version: 1.0.0, workflow: publish-sdk.yml)
-
-node scripts/validate-tag.js cli-v2.0.0 react-v1.0.0-beta.1 indexer-v0.5.0
-# each tag maps to exactly one component
-
-node scripts/validate-tag.js v1.0.0
-# ERROR: Tag "v1.0.0" does not match any component pattern
-```
-
-An unrelated tag such as `v1.0.0` or `release-v1.0.0` matches no workflow, so nothing is published.
-
-## Legacy Changesets publishing (deprecated)
-
-> **Note:** The following describes the previous Changesets-based workflow which is being phased out in favor of component-specific tag publishing.
-
-`@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react` previously published from
+`@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react` publish from
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) on a push to
-`main`. Changesets opened the version PR, and the publish step built each
-package, set `npm config set provenance true`, and ran `npx changeset publish`.
+`main`. Changesets opens the version PR, and the publish step builds each
+package, sets `npm config set provenance true`, and runs `npx changeset publish`.
 
-The workflow granted `id-token: write` so npm could verify the GitHub Actions OIDC
-token. It did not pass `NODE_AUTH_TOKEN`. A long-lived npm token was not part of
+The workflow grants `id-token: write` so npm can verify the GitHub Actions OIDC
+token. It does not pass `NODE_AUTH_TOKEN`. A long-lived npm token is not part of
 the normal publish path.
 
-### One-time npm trusted-publisher setup
+## One-time npm trusted-publisher setup
 
-Do this once per package (`@bc-forge/sdk`, `@bc-forge/cli`, `@bc-forge/react`, `@bc-forge/indexer`)
+Do this once per package (`@bc-forge/sdk`, `@bc-forge/cli`, `@bc-forge/react`)
 in the npm organization that owns the scope:
 
 1. Sign in to [npmjs.com](https://www.npmjs.com) as an owner of the `bc-forge` organization.
@@ -85,13 +19,48 @@ in the npm organization that owns the scope:
 3. Add a GitHub Actions publisher:
    - Organization or user: `BCPathway`
    - Repository: `bc-forge`
-   - Workflow filename: `publish-sdk.yml` (or `publish-cli.yml`, `publish-react.yml`, `publish-indexer.yml`)
-   - Environment name: leave empty unless a GitHub Environment is added to the release job later
-4. Save. Repeat for the other packages.
+   - Workflow filename: `release.yml`
+   - Environment name: `npm`
+4. Save. Repeat for the other two packages.
 5. Confirm **Access** is public for each package. The changesets config sets `"access": "public"`.
-6. After the next release, open the package's **Versions** page and confirm the version shows a provenance attestation. The statement is also linked from the GitHub Actions run of the component publish workflow.
+6. After the next release, open the package's **Versions** page and confirm the version shows a provenance attestation. The statement is also linked from the GitHub Actions run of `Release packages`.
 
-Provenance is requested by `npm config set provenance true` before `npm publish`. Pull requests do not publish.
+Provenance is requested by `npm config set provenance true` before `changeset publish`. Pull requests do not publish.
+
+## Protected environments and workflow permissions
+
+Release publish workflows enforce least-privilege permissions and require deployment through protected GitHub Environments.
+
+### Named GitHub Environments
+
+1. **`npm` Environment**:
+   - Referenced by the Changesets publish job in [`release.yml`](../.github/workflows/release.yml). That job is the npm publisher for `@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react`. This repository does not add separate `publish-sdk.yml` or `publish-cli.yml` workflows, because a second publisher on `release: published` would publish those packages again after Changesets creates the GitHub Release.
+   - npm trusted publishing uses GitHub OIDC. The publisher record on npmjs must use workflow filename `release.yml` and environment name `npm`. The job grants `id-token: write` and does not send `NODE_AUTH_TOKEN` on the normal path.
+   - Fallback secret: store `NPM_TOKEN` as a secret on the `npm` environment, not as a repository-wide secret, and only wire it into the Changesets step for a one-off fallback publish.
+2. **`container` Environment**:
+   - Referenced by [`publish-release-manifest.yml`](../.github/workflows/publish-release-manifest.yml), which builds the indexer image and attaches the image digest plus release assets.
+   - A future GHCR push workflow must use this same `container` environment, authenticate with `GITHUB_TOKEN`, and must not reuse npm secrets.
+
+### GitHub Repository Settings & Required Reviewers
+
+These settings cannot be expressed in workflow YAML. Configure them under **Settings → Environments**:
+
+- **Required reviewers**: enable required reviewers on both `npm` and `container` so a release maintainer must approve the job before it publishes.
+- **Deployment branches**: allow `main` for `release.yml`. Allow the release tags that trigger `publish-release-manifest.yml`.
+- **Environment secrets**: `NPM_TOKEN` belongs on `npm` only. The container job uses the built-in `GITHUB_TOKEN` and does not need an npm token or any other secret.
+
+### Workflow Permissions Inventory
+
+Publish workflows set top-level `permissions: {}` so every unspecified `GITHUB_TOKEN` permission is `none`. Each job then opts into only what it uses:
+
+- **`release.yml`** (`release` job, environment `npm`):
+  - `contents: write` (push release commits and tags)
+  - `id-token: write` (OIDC token for npm provenance)
+  - `pull-requests: write` (open and update the Changesets version PR)
+- **`publish-release-manifest.yml`** (`manifest` job, environment `container`):
+  - `contents: write` (upload the indexer image digest, checksums, and release assets)
+
+Any later component publisher must keep `permissions: {}` at the workflow root, declare job permissions explicitly, and select `environment: npm` or `environment: container`. It must not grant `packages: write` to an npm job or `id-token: write` to a container job unless that job needs it.
 
 ## Fallback secret and rotation
 
@@ -140,3 +109,29 @@ Get-Content checksums.txt | ForEach-Object {
 A matching command prints `OK` for each file. A mismatch prints a checksum error and a non-zero exit status.
 
 The indexer entry in `manifest.json` uses `digest` (`sha256:...`) rather than a filename. Compare that value to `containerimage.digest` in the "Build indexer image and record its digest" log of the release workflow. That digest is the image built for the release; it is not a GHCR pull digest, because this repository does not push the indexer image.
+
+## Rerun behavior
+
+`.github/workflows/release.yml` publishes npm packages on push to `main`. It does not push images to GHCR. `publish-sdk.yml` and `publish-cli.yml` are not on `main`. SDK, CLI, React, and the indexer package publish through this Changesets workflow.
+
+Concurrency is per component on the publish guard (`publish-sdk`, `publish-cli`, `publish-react`, `publish-indexer`) plus `publish-changesets` for the release job. `cancel-in-progress` is false on each group. A second push waits. It cannot cancel a publish that has already started, and one component's release does not cancel another's.
+
+Before `changeset publish`, `scripts/check-version-tag.mjs --before-changeset-publish` queries npm for each package's exact version:
+
+- The version is not on npm: publish continues.
+- The exact version is already published and the registry version matches the intended version, including a tarball: the command exits 0. Changesets will not publish that version again. A rerun is a no-op.
+- The version is already on npm but the registry version or tarball does not match the intended version: the command fails. Do not force-publish over the conflicting artifact.
+
+A direct tag check (`node scripts/check-version-tag.mjs sdk@1.2.3`) still rejects a version that is already on npm. The release path above is the one that treats a matching republish as a no-op.
+
+Re-run the failed Release workflow from the Actions tab after fixing the commit. A successful rerun of a commit whose versions are already on npm with the same version exits 0 and does not publish a second copy.
+
+## Component tags
+
+`scripts/validate-tag.js` maps a tag to exactly one component. CI runs `node --test scripts/validate-tag.test.mjs`.
+
+- `sdk-v*`, `cli-v*`, and `react-v*` name those npm packages. They do not start a second registry write. `@bc-forge/sdk`, `@bc-forge/cli`, and `@bc-forge/react` publish from [`release.yml`](../.github/workflows/release.yml).
+- `indexer-v*` selects [`publish-indexer.yml`](../.github/workflows/publish-indexer.yml) for the indexer image. It does not publish the npm packages.
+- Any other tag, including `v1.2.3`, selects no publisher.
+
+[`.github/workflows/publish-package.yml`](../.github/workflows/publish-package.yml) is a reusable `workflow_call` that validates the package input and can install, build, test, and publish. [`.github/workflows/publish-dry-run.yml`](../.github/workflows/publish-dry-run.yml) demonstrates it with `npm publish --dry-run` and does not write to the registry. There is no `publish-sdk.yml` or `publish-cli.yml`.
