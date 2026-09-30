@@ -110,6 +110,49 @@ A matching command prints `OK` for each file. A mismatch prints a checksum error
 
 The indexer entry in `manifest.json` uses `digest` (`sha256:...`) rather than a filename. Compare that value to `containerimage.digest` in the "Build indexer image and record its digest" log of the release workflow. That digest is the image built for the release; it is not a GHCR pull digest, because this repository does not push the indexer image.
 
+## Deliverable checklist
+
+Use this list before and after a release. Migration and upgrade steps stay in [UPGRADE_GUIDE.md](./UPGRADE_GUIDE.md); do not copy them here.
+
+### SDK (`@bc-forge/sdk`, npm)
+
+- [ ] Version and changelog match the changeset.
+- [ ] `npm test` and `npm run build` pass in `sdk/`.
+- [ ] Verify: `npm view @bc-forge/sdk@<version> version` equals that version, and the release-manifest checksum matches the packed tarball.
+- [ ] Rollback: do not republish the version. Deprecate it (`npm deprecate @bc-forge/sdk@<version> "reason"`) and publish a patched version. Point consumers at [UPGRADE_GUIDE.md](./UPGRADE_GUIDE.md).
+
+### CLI (`@bc-forge/cli`, npm)
+
+- [ ] Tests and `npm run build` pass in `cli/`.
+- [ ] Verify: a clean install of that exact version runs `bc-forge --help`.
+- [ ] Rollback: deprecate the bad version and publish a patch. Do not reuse the version number.
+
+### React (`@bc-forge/react`, npm)
+
+- [ ] `npm test` and `npm run build` pass in `react/`.
+- [ ] Verify: a clean project installs the exact version and imports a component from the package.
+- [ ] Rollback: deprecate the version and publish a patch. Do not unpublish.
+
+### Indexer (service and image)
+
+- [ ] `prisma migrate deploy` applies `indexer/prisma/migrations` in timestamp order before the process serves traffic.
+- [ ] Verify: `GET /health` is ok and `GET /healthz` lag matches the indexer runbook.
+- [ ] Rollback: redeploy the previous image digest. If the new schema cannot be read by that image, restore the database backup taken before the migration.
+
+### Contract WASM
+
+- [ ] The token WASM build is within budget and the release manifest records its checksum.
+- [ ] Verify: the installed bytecode hash matches the manifest.
+- [ ] Rollback: redeploy the previous WASM only when [UPGRADE_GUIDE.md](./UPGRADE_GUIDE.md) says that contract allows it. Otherwise pause and follow that guide.
+
+### Docs
+
+- [ ] `npm run docs:build` passes.
+- [ ] Verify: the published site matches the release commit.
+- [ ] Rollback: revert the docs commit and redeploy the previous site build. Package and WASM rollbacks stay on their own artifacts.
+
+npm versions and published WASM are immutable, so their rollback is a new version plus deprecation or a documented contract downgrade. Images and the database roll back to a previous digest or backup.
+
 ## Rerun behavior
 
 `.github/workflows/release.yml` publishes npm packages on push to `main`. It does not push images to GHCR. `publish-sdk.yml` and `publish-cli.yml` are not on `main`. SDK, CLI, React, and the indexer package publish through this Changesets workflow.

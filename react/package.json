@@ -31,7 +31,23 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/p3ris0n/bc-forge.git"
+    "url": "git+https://github.com/BCPathway/bc-forge.git",
+    "directory": "react"
+  },
+  "homepage": "https://github.com/BCPathway/bc-forge#readme",
+  "bugs": {
+    "url": "https://github.com/BCPathway/bc-forge/issues"
+  },
+  "keywords": [
+    "bc-forge",
+    "react",
+    "web3",
+    "hooks",
+    "components"
+  ],
+  "funding": {
+    "type": "drips",
+    "url": "https://www.drips.network/wave"
   },
   "author": "bc-forge contributors",
   "license": "MIT",
