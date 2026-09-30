@@ -177,7 +177,7 @@ async function persistEventRow(
     return created;
   };
   const transactional = client as PrismaClient & {
-    $transaction?: (fn: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown>;
+    $transaction?: <T>(fn: (tx: PrismaClient) => Promise<T>) => Promise<T>;
   };
   if (typeof transactional.$transaction === 'function') {
     return transactional.$transaction((tx) => run(tx as never));

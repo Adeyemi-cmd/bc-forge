@@ -5,15 +5,17 @@ on:
     branches:
       - main
 
-permissions:
-  contents: write
-  id-token: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release:
     name: Release packages
     runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,10 +46,15 @@ jobs:
             npm run build --workspace @bc-forge/sdk
             npm run build --workspace @bc-forge/cli
             npm run build --workspace @bc-forge/react
+            npm run build --workspace @bc-forge/indexer
             npm config set provenance true
+            node scripts/check-version-tag.mjs --before-changeset-publish
             npx changeset publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check release status
-        run: |
-          echo "Published packages: ${{ steps.changesets.outputs.publishedPackages || 'none' }}"
+
+      - name: Attach component release notes
+        env:
+          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs.publishedPackages }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-notes.mjs --attach
