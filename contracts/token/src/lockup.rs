@@ -127,6 +127,24 @@ fn non_admin_cannot_lock_tokens() {
 }
 
 #[test]
+fn burn_allows_exactly_the_free_balance_and_preserves_lock() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let user = Address::generate(&env);
+    mint(&env, &client, &admin, &user, 1_000);
+    client.lock_tokens(&admin, &user, &400, &200);
+    let supply = client.supply();
+
+    client.burn(&user, &600);
+
+    assert_eq!(client.balance(&user), 400);
+    assert_eq!(client.supply(), supply - 600);
+    env.as_contract(&client.address, || {
+        assert_eq!(BcForgeToken::get_locked_amount(&env, &user), 400);
+    });
+}
+
+#[test]
 fn holder_withdraws_expired_lock_without_changing_accounting() {
     let env = Env::default();
     let (client, admin) = setup(&env);
@@ -177,6 +195,67 @@ fn early_withdraw_fails_and_preserves_lock() {
 }
 
 #[test]
+fn burn_rejects_spending_any_locked_balance() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let user = Address::generate(&env);
+    mint(&env, &client, &admin, &user, 1_000);
+    client.lock_tokens(&admin, &user, &400, &200);
+
+    assert_eq!(
+        client.try_burn(&user, &601),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            TokenError::InsufficientBalance as u32
+        )))
+    );
+    assert_eq!(client.balance(&user), 1_000);
+    assert_eq!(client.supply(), 1_000);
+}
+
+#[test]
+fn burn_from_enforces_lock_in_addition_to_allowance() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    mint(&env, &client, &admin, &owner, 1_000);
+    client.lock_tokens(&admin, &owner, &400, &200);
+    client.approve(&owner, &spender, &1_000, &u32::MAX);
+
+    assert_eq!(
+        client.try_burn_from(&spender, &owner, &601),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            TokenError::InsufficientBalance as u32
+        )))
+    );
+    assert_eq!(client.allowance(&owner, &spender), 1_000);
+    assert_eq!(client.balance(&owner), 1_000);
+    assert_eq!(client.supply(), 1_000);
+    client.burn_from(&spender, &owner, &600);
+    assert_eq!(client.balance(&owner), 400);
+    assert_eq!(client.supply(), 400);
+    assert_eq!(client.allowance(&owner, &spender), 400);
+}
+
+#[test]
+fn expired_but_unwithdrawn_lock_still_blocks_burn() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let user = Address::generate(&env);
+    mint(&env, &client, &admin, &user, 1_000);
+    client.lock_tokens(&admin, &user, &400, &50);
+    env.ledger().set_timestamp(50);
+
+    assert!(!env.as_contract(&client.address, || BcForgeToken::is_locked(&env, &user)));
+    assert_eq!(
+        client.try_burn(&user, &601),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            TokenError::InsufficientBalance as u32
+        )))
+    );
+}
+
+#[test]
 fn withdraw_requires_holder_authorization() {
     let env = Env::default();
     let (client, admin) = setup(&env);
@@ -201,6 +280,108 @@ fn withdraw_requires_initialized_contract() {
         client.try_withdraw_locked(&user),
         Err(Ok(TokenError::NotInitialized))
     );
+}
+
+#[test]
+fn lock_and_withdraw_are_available_while_paused_but_transfer_is_not() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let user = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint(&env, &client, &admin, &user, 100);
+    client.pause(&admin);
+    client.lock_tokens(&admin, &user, &40, &0);
+    assert_eq!(client.balance(&user), 100);
+    assert!(client.try_transfer(&user, &recipient, &1).is_err());
+    client.withdraw_locked(&user);
+    assert_eq!(client.balance(&user), 100);
+}
+
+#[test]
+fn ownership_transfer_changes_who_can_lock() {
+    let env = Env::default();
+    let (client, old_admin) = setup(&env);
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    mint(&env, &client, &old_admin, &user, 100);
+    client.propose_privilege_action(
+        &old_admin,
+        &bc_forge_admin::PrivilegeAction::TransferOwnership(new_admin.clone()),
+    );
+    let mut info = env.ledger().get();
+    info.timestamp += 24 * 60 * 60;
+    env.ledger().set(info);
+    client.transfer_ownership(&new_admin);
+    client.lock_tokens(&new_admin, &user, &10, &0);
+    assert!(client.try_lock_tokens(&old_admin, &user, &1, &0).is_err());
+}
+
+#[test]
+fn full_lockup_cycle_preserves_supply_invariant() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let holder = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint(&env, &client, &admin, &holder, 1_000);
+    client.lock_tokens(&admin, &holder, &400, &100);
+    client.transfer(&holder, &recipient, &600);
+    assert!(client.try_transfer(&holder, &recipient, &1).is_err());
+    env.ledger().set_timestamp(100);
+    client.withdraw_locked(&holder);
+    client.transfer(&holder, &recipient, &400);
+    assert_eq!(client.balance(&holder), 0);
+    assert_eq!(
+        client.supply(),
+        client.balance(&holder) + client.balance(&recipient)
+    );
+}
+
+#[test]
+fn one_hundred_lock_sequences_accumulate_and_keep_max_timestamp() {
+    for seed in 0u64..100 {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let user = Address::generate(&env);
+        mint(&env, &client, &admin, &user, 1_000);
+        let mut expected_amount = 0;
+        let mut expected_unlock = 0;
+        let mut random = seed + 1;
+        for _ in 0..10 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let amount = (random % 10 + 1) as i128;
+            let unlock = random % 10_000;
+            client.lock_tokens(&admin, &user, &amount, &unlock);
+            expected_amount += amount;
+            expected_unlock = expected_unlock.max(unlock);
+        }
+        env.as_contract(&client.address, || {
+            assert_eq!(
+                BcForgeToken::read_lockup(&env, &user),
+                Some(LockupState {
+                    amount: expected_amount,
+                    unlock_timestamp: expected_unlock
+                })
+            );
+        });
+    }
+}
+
+#[test]
+fn withdrawal_boundary_holds_for_one_hundred_generated_cases() {
+    for case in 0u64..100 {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let user = Address::generate(&env);
+        mint(&env, &client, &admin, &user, 1);
+        let unlock = case * 3 + 1;
+        client.lock_tokens(&admin, &user, &1, &unlock);
+        let now = if case % 2 == 0 { unlock - 1 } else { unlock };
+        env.ledger().set_timestamp(now);
+        let result = client.try_withdraw_locked(&user);
+        assert_eq!(result.is_err(), now < unlock);
+    }
 }
 
 #[test]

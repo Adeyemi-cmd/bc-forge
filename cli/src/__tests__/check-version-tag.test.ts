@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MIT
 import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import {
   validateVersionTag,
   validateBeforeChangesetPublish,
+  classifyRegistryRelease,
+  parseReleaseTag,
   KNOWN_PACKAGES,
 } from '../../../scripts/check-version-tag.mjs';
 
@@ -46,6 +50,48 @@ describe('scripts/check-version-tag.mjs', () => {
       expect(result.success).toBe(true);
       expect(result.component).toBe('react');
       expect(result.version).toBe('1.0.0');
+    });
+
+    it('keeps the prerelease suffix on a React tag', () => {
+      const parsed = parseReleaseTag('refs/tags/react-v1.0.0-beta.1');
+      expect(parsed.component).toBe('react');
+      expect(parsed.version).toBe('1.0.0-beta.1');
+
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'react-tag-'));
+      fs.mkdirSync(path.join(dir, 'react'));
+      fs.writeFileSync(
+        path.join(dir, 'react', 'package.json'),
+        JSON.stringify({ name: '@bc-forge/react', version: '1.0.0-beta.1' }),
+      );
+      const result = validateVersionTag('react-v1.0.0-beta.1', {
+        rootDir: dir,
+        checkRegistry: mockUnpublishedRegistry,
+      });
+      expect(result.version).toBe('1.0.0-beta.1');
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('fails a React tag for the wrong component or a mismatched version', () => {
+      expect(() => {
+        validateVersionTag('widget@1.0.0', {
+          rootDir,
+          checkRegistry: mockUnpublishedRegistry,
+        });
+      }).toThrow(/Unknown component "widget"/);
+
+      expect(() => {
+        validateVersionTag('react@9.9.9', {
+          rootDir,
+          checkRegistry: mockUnpublishedRegistry,
+        });
+      }).toThrow(/Tag version "9\.9\.9" does not match package\.json version/);
+
+      expect(() => {
+        validateVersionTag('react-v1.0.0-beta.1', {
+          rootDir,
+          checkRegistry: mockUnpublishedRegistry,
+        });
+      }).toThrow(/Tag version "1\.0\.0-beta\.1" does not match package\.json version/);
     });
 
     it('fails when tag has wrong version', () => {
@@ -117,20 +163,97 @@ describe('scripts/check-version-tag.mjs', () => {
       }).toThrow(/Malformed tag format/);
     });
 
-    it('skips already published packages and validates unpublished ones before Changesets publish', () => {
+    it('validates unpublished packages and treats a matching republish as a no-op', () => {
       const unpublished = validateBeforeChangesetPublish({
         rootDir,
-        checkRegistry: mockUnpublishedRegistry,
+        inspectRegistry: () => ({ published: false, remoteVersion: null, hasArtifact: false }),
       });
       expect(unpublished.map((result) => result.component).sort()).toEqual(
         Object.keys(KNOWN_PACKAGES).sort(),
       );
+      expect(unpublished.every((result) => !result.noop)).toBe(true);
 
-      const none = validateBeforeChangesetPublish({
+      const rerun = validateBeforeChangesetPublish({
         rootDir,
-        checkRegistry: mockPublishedRegistry,
+        inspectRegistry: ({ version }) => ({
+          published: true,
+          remoteVersion: version,
+          hasArtifact: true,
+        }),
       });
-      expect(none).toEqual([]);
+      expect(rerun.map((result) => result.component).sort()).toEqual(
+        Object.keys(KNOWN_PACKAGES).sort(),
+      );
+      expect(rerun.every((result) => result.noop)).toBe(true);
+    });
+
+    it('fails before Changesets publish when an existing artifact does not match', () => {
+      expect(() => {
+        validateBeforeChangesetPublish({
+          rootDir,
+          inspectRegistry: () => ({
+            published: true,
+            remoteVersion: '9.9.9',
+            hasArtifact: true,
+          }),
+        });
+      }).toThrow(/does not match the existing npm artifact/);
+
+      expect(() => {
+        validateBeforeChangesetPublish({
+          rootDir,
+          inspectRegistry: ({ version }) => ({
+            published: true,
+            remoteVersion: version,
+            hasArtifact: true,
+            artifactMatches: false,
+          }),
+        });
+      }).toThrow(/does not match the existing npm artifact/);
+    });
+
+    it('classifies a matching published version as a no-op and a mismatch as failure', () => {
+      expect(
+        classifyRegistryRelease({
+          published: false,
+          remoteVersion: null,
+          intendedVersion: '1.2.3',
+          hasArtifact: false,
+        }),
+      ).toBe('publish');
+      expect(
+        classifyRegistryRelease({
+          published: true,
+          remoteVersion: '1.2.3',
+          intendedVersion: '1.2.3',
+          hasArtifact: true,
+        }),
+      ).toBe('noop');
+      expect(
+        classifyRegistryRelease({
+          published: true,
+          remoteVersion: '1.2.2',
+          intendedVersion: '1.2.3',
+          hasArtifact: true,
+        }),
+      ).toBe('mismatch');
+      expect(
+        classifyRegistryRelease({
+          published: true,
+          remoteVersion: '1.2.3',
+          intendedVersion: '1.2.3',
+          hasArtifact: false,
+        }),
+      ).toBe('mismatch');
+      expect(
+        classifyRegistryRelease({
+          published: true,
+          remoteVersion: '1.2.3',
+          intendedVersion: '1.2.3',
+          hasArtifact: true,
+          artifactMatches: false,
+        }),
+      ).toBe('mismatch');
     });
 
     it('fails when version is already published (mocked registry check)', () => {

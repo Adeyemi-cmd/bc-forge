@@ -409,6 +409,25 @@ jobs:
             fi
           done
 
+  # ─── README project tree (#1027) ─────────────────────────────────────────
+  readme-tree:
+    name: README project tree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check project structure against the README
+        run: node scripts/checkReadmeTree.js
+
+      - name: Test the project-tree check
+        run: node --test scripts/checkReadmeTree.test.js
+
   # ─── Documentation link check (#348) ─────────────────────────────────────
   docs-links:
     name: Documentation Links

@@ -341,7 +341,7 @@ impl BcForgeToken {
         amount: i128,
     ) -> Result<(), TokenError> {
         let from_balance = Self::read_balance(env, from);
-        if from_balance < amount {
+        if Self::get_spendable_balance(env, from) < amount {
             return Err(TokenError::InsufficientBalance);
         }
 
@@ -470,6 +470,15 @@ impl BcForgeToken {
     fn get_locked_amount(env: &Env, user: &Address) -> i128 {
         Self::read_lockup(env, user)
             .map(|state| state.amount)
+            .unwrap_or(0)
+    }
+
+    /// Returns the balance that may be spent without consuming a persisted
+    /// lock. Locks continue to reserve their amount after their timestamp has
+    /// expired until the holder explicitly withdraws them.
+    fn get_spendable_balance(env: &Env, user: &Address) -> i128 {
+        Self::read_balance(env, user)
+            .checked_sub(Self::get_locked_amount(env, user))
             .unwrap_or(0)
     }
 
@@ -694,7 +703,7 @@ impl BcForgeToken {
                 };
             }
 
-            if Self::read_balance(&env, &from) < total {
+            if Self::get_spendable_balance(&env, &from) < total {
                 return Err(TokenError::InsufficientBalance);
             }
 
@@ -1404,7 +1413,7 @@ impl TokenInterface for BcForgeToken {
         }
 
         let balance = Self::read_balance(&env, &from);
-        if balance < amount {
+        if Self::get_spendable_balance(&env, &from) < amount {
             soroban_sdk::panic_with_error!(&env, TokenError::InsufficientBalance);
         }
 
@@ -1443,7 +1452,7 @@ impl TokenInterface for BcForgeToken {
 
         let allowance_data = Self::read_allowance_data(&env, &from, &spender);
         let balance = Self::read_balance(&env, &from);
-        if balance < amount {
+        if Self::get_spendable_balance(&env, &from) < amount {
             soroban_sdk::panic_with_error!(&env, TokenError::InsufficientBalance);
         }
 
