@@ -4,11 +4,11 @@ on:
   workflow_call:
     inputs:
       package-dir:
-        description: "Directory of the package to publish (e.g., sdk, cli, react, indexer)"
+        description: "Directory of the package to publish (sdk, cli, react, or indexer)"
         required: true
         type: string
       package-name:
-        description: "npm package name (e.g., @bc-forge/sdk)"
+        description: "npm package name (for example @bc-forge/sdk)"
         required: true
         type: string
       build-command:
@@ -20,12 +20,17 @@ on:
         required: true
         type: string
       tag-prefix:
-        description: "Tag prefix that triggers this workflow (e.g., sdk-v)"
+        description: "Tag prefix that triggers this workflow (for example sdk-v)"
         required: true
         type: string
+      dry-run:
+        description: "Run install, build, test, and npm publish --dry-run without writing to the registry"
+        required: false
+        type: boolean
+        default: false
     secrets:
       NPM_TOKEN:
-        description: "Optional npm token for fallback publishing"
+        description: "Optional npm token for fallback publishing. Omit it to use OIDC trusted publishing."
         required: false
 
 permissions:
@@ -34,7 +39,7 @@ permissions:
 
 jobs:
   validate-tag:
-    name: Validate Tag
+    name: Validate tag and package input
     runs-on: ubuntu-latest
     outputs:
       should-publish: ${{ steps.check.outputs.should-publish }}
@@ -42,29 +47,57 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Check tag matches prefix
-        id: check
+      - name: Validate package input
         run: |
-          TAG="${{ github.ref_name }}"
-          PREFIX="${{ inputs.tag-prefix }}"
-          if [[ "$TAG" == "$PREFIX"* ]]; then
-            VERSION="${TAG#$PREFIX}"
-            echo "should-publish=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "Tag $TAG matches prefix $PREFIX, version: $VERSION"
-          else
-            echo "should-publish=false" >> $GITHUB_OUTPUT
-            echo "version=" >> $GITHUB_OUTPUT
-            echo "Tag $TAG does not match prefix $PREFIX, skipping publish"
+          set -euo pipefail
+          dir="${{ inputs.package-dir }}"
+          expected="${{ inputs.package-name }}"
+          prefix="${{ inputs.tag-prefix }}"
+          case "$dir" in
+            sdk|cli|react|indexer) ;;
+            *)
+              echo "::error::package-dir must be sdk, cli, react, or indexer"
+              exit 1
+              ;;
+          esac
+          if [[ "$prefix" != "$dir-v" ]]; then
+            echo "::error::tag-prefix ${prefix} does not match package-dir ${dir}"
+            exit 1
+          fi
+          name="$(node -p "require('./${dir}/package.json').name")"
+          if [[ "$name" != "$expected" ]]; then
+            echo "::error::${dir}/package.json name is ${name}, expected ${expected}"
+            exit 1
           fi
 
+      - name: Check tag matches exactly one component
+        id: check
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=dry-run" >> "$GITHUB_OUTPUT"
+            echo "Dry run: skipping tag gate and registry write."
+            exit 0
+          fi
+          result="$(node scripts/validate-tag.js "$GITHUB_REF_NAME")"
+          echo "$result"
+          case "$result" in
+            *"-> ${{ inputs.package-dir }} "*) ;;
+            *)
+              echo "::error::Tag does not route only to ${{ inputs.package-dir }}"
+              exit 1
+              ;;
+          esac
+          version="${GITHUB_REF_NAME#${{ inputs.tag-prefix }}}"
+          echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
   publish:
-    name: Build, Test, and Publish
+    name: Build, test, and publish
     needs: validate-tag
-    if: needs.validate-tag.outputs.should-publish == 'true'
+    if: inputs.dry-run || needs.validate-tag.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,8 +105,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -92,23 +123,27 @@ jobs:
       - name: Test package
         run: ${{ inputs.test-command }}
 
-      - name: Validate package contents
-        run: npm run test:tarball --workspace ${{ inputs.package-name }}
+      - name: Validate packed tarballs
+        run: |
+          npm run build --workspace @bc-forge/sdk
+          npm run build --workspace @bc-forge/cli
+          npm run build --workspace @bc-forge/react
+          npm run test:tarball
 
       - name: Publish to npm
-        if: env.NPM_TOKEN == ''
-        run: |
-          npm config set provenance true
-          npm publish --access public --provenance
+        if: ${{ !inputs.dry-run }}
+        working-directory: ${{ inputs.package-dir }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: ${{ inputs.package-dir }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            unset NODE_AUTH_TOKEN
+          fi
+          npm config set provenance true
+          npm publish --access public --provenance
 
-      - name: Publish to npm (with token fallback)
-        if: env.NPM_TOKEN != ''
-        run: |
-          npm config set provenance true
-          npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Demonstrate publish without writing to the registry
+        if: ${{ inputs.dry-run }}
         working-directory: ${{ inputs.package-dir }}
+        run: npm publish --dry-run --access public

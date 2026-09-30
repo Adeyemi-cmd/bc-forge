@@ -19,6 +19,8 @@ All component workflows use the reusable workflow [`.github/workflows/publish-pa
 - Publishes to npm using OIDC trusted publishing (falls back to `NPM_TOKEN` secret if needed)
 - Sets `npm config set provenance true` for provenance attestations
 
+A non-publishing demonstration is [`.github/workflows/publish-dry-run.yml`](../.github/workflows/publish-dry-run.yml). Running it with `workflow_dispatch` calls the reusable workflow with `dry-run: true`, which installs, builds, tests, checks the tarball, and runs `npm publish --dry-run` without writing to the registry.
+
 ### Tag format
 
 Tags must follow the pattern `<component>-v<version>` where:
@@ -49,17 +51,16 @@ Run the tag validation script to verify a tag maps to exactly one component:
 
 ```bash
 node scripts/validate-tag.js sdk-v1.0.0
-# Output: sdk
+# sdk-v1.0.0 -> sdk (version: 1.0.0, workflow: publish-sdk.yml)
 
-node scripts/validate-tag.js cli-v2.0.0
-# Output: cli
+node scripts/validate-tag.js cli-v2.0.0 react-v1.0.0-beta.1 indexer-v0.5.0
+# each tag maps to exactly one component
 
 node scripts/validate-tag.js v1.0.0
-# Output: (none - no match)
-
-node scripts/validate-tag.js sdk-v1.0.0 cli-v2.0.0
-# Output: ERROR: Multiple components matched
+# ERROR: Tag "v1.0.0" does not match any component pattern
 ```
+
+An unrelated tag such as `v1.0.0` or `release-v1.0.0` matches no workflow, so nothing is published.
 
 ## Legacy Changesets publishing (deprecated)
 
