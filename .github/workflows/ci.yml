@@ -281,7 +281,7 @@ jobs:
         run: npm test
 
       - name: Map sample release tags to one publisher
-        working-directory: ..
+        working-directory: .
         run: node --test scripts/validate-tag.test.mjs
 
   # ─── React Package CI (#896) ────────────────────────────────────────────
