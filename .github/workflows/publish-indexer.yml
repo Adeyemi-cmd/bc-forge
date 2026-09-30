@@ -125,6 +125,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=buildnet
+          # The local registry speaks HTTP. Without this, BuildKit pushes to
+          # https://registry:5000 and the registry answers with plain HTTP.
+          buildkitd-config-inline: |
+            [registry."registry:5000"]
+              http = true
+              insecure = true
 
       - name: Build multi-arch indexer image
         id: build
