@@ -128,7 +128,18 @@ failures are logged server-side with credentials scrubbed.
 Build the production Docker container from the root directory:
 
 ```bash
-docker build -f indexer/Dockerfile -t bc-forge-indexer indexer
+docker build -f indexer/Dockerfile -t bc-forge-indexer .
+```
+
+The build context must be the repository root (not `indexer/`) because
+`@bc-forge/indexer` depends on the `@bc-forge/sdk` workspace, which is
+resolved via the root lockfile rather than the npm registry.
+
+For a multi-architecture build (linux/amd64 + linux/arm64 under one
+manifest list, as published by `.github/workflows/publish-indexer.yml`):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -f indexer/Dockerfile -t bc-forge-indexer .
 ```
 
 ### Running the Container

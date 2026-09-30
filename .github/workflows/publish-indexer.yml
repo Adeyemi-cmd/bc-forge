@@ -1,9 +1,11 @@
 name: Publish indexer image
 
 # Builds indexer/Dockerfile and publishes the image to GHCR when an indexer
-# release tag lands. The same final image is smoke-tested against fresh
-# Postgres before any registry write. Before a stable tag moves, Trivy scans
-# that image and fails on fixable critical vulnerabilities unless
+# release tag lands. Buildx produces linux/amd64 and linux/arm64 under one
+# manifest list (#1049). That image is pushed to a local registry first so the
+# amd64 variant can be smoke-tested against fresh Postgres, both variants can
+# start Node, and Trivy can scan the amd64 image before any GHCR write.
+# Fixable critical vulnerabilities fail the job unless
 # .github/vulnerability-exceptions.yml names the advisory and an unexpired
 # expiry (#1052). The SARIF report is retained. Component tags (sdk-v*, cli-v*,
 # react-v*) do not match this filter, so they never push an image.
@@ -30,6 +32,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: bcpathway/bc-forge-indexer
   TAG_PREFIX: indexer-v
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   publish:
@@ -110,23 +113,80 @@ jobs:
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Start local registry
+        run: docker run -d --name registry -p 5000:5000 registry:2
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # host network so BuildKit and `imagetools inspect` both reach the
+          # registry at localhost:5000. A bridge alias (`registry`) is not
+          # resolvable from the runner, which is where inspect runs.
+          driver-opts: network=host
+          # The local registry speaks HTTP. Without this, BuildKit pushes to
+          # https://localhost:5000 and the registry answers with plain HTTP.
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+              insecure = true
 
-      - name: Build final indexer image
+      - name: Build multi-arch indexer image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./indexer/Dockerfile
-          push: false
-          load: true
-          tags: bc-forge-indexer:smoke
+          push: true
+          provenance: false
+          sbom: false
+          platforms: ${{ env.PLATFORMS }}
+          tags: localhost:5000/bc-forge-indexer:smoke
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version || 'smoke' }}
           build-args: |
             BUILD_NAME=bc-forge-indexer
             BUILD_VERSION=${{ steps.meta.outputs.version || 'smoke' }}
             BUILD_REVISION=${{ github.sha }}
             BUILD_SOURCE=${{ github.server_url }}/${{ github.repository }}
             BUILD_DATE=${{ steps.meta.outputs.build_date || 'unknown' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify multi-arch manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect localhost:5000/bc-forge-indexer:smoke --raw | tee /tmp/manifest.json
+          python3 - << 'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("/tmp/manifest.json").read_text(encoding="utf-8"))
+          manifests = data.get("manifests")
+          if not isinstance(manifests, list) or not manifests:
+              raise SystemExit("no manifests array in image index")
+          arches = set()
+          for entry in manifests:
+              platform = entry.get("platform") or {}
+              arch = platform.get("architecture")
+              os_name = platform.get("os")
+              if arch and os_name and arch != "unknown" and os_name != "unknown":
+                  arches.add(f"{os_name}/{arch}")
+          print(f"platforms found: {sorted(arches)}")
+          missing = {"linux/amd64", "linux/arm64"} - arches
+          if missing:
+              raise SystemExit(f"missing platforms in manifest: {sorted(missing)}")
+          print("multi-arch manifest OK: linux/amd64 and linux/arm64 present")
+          PY
+
+      - name: Load amd64 image for smoke test
+        run: |
+          docker pull --platform linux/amd64 localhost:5000/bc-forge-indexer:smoke
+          docker tag localhost:5000/bc-forge-indexer:smoke bc-forge-indexer:smoke
 
       - name: Run final indexer container against fresh Postgres
         run: |
@@ -168,6 +228,15 @@ jobs:
       - name: Stop smoke test container
         if: always()
         run: docker rm -f indexer-smoke-target || true
+
+      - name: Confirm both architectures start Node
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            echo "--- ${platform}: node process starts ---"
+            docker run --rm --platform "${platform}" localhost:5000/bc-forge-indexer:smoke \
+              node -e "if (!process.version) process.exit(1); console.log('node ok', process.arch, process.version)"
+          done
 
       - name: Scan image for critical vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
@@ -265,25 +334,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push indexer image
+        id: push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./indexer/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          build-args: |
-            BUILD_NAME=bc-forge-indexer
-            BUILD_VERSION=${{ steps.meta.outputs.version }}
-            BUILD_REVISION=${{ github.sha }}
-            BUILD_SOURCE=${{ github.server_url }}/${{ github.repository }}
-            BUILD_DATE=${{ steps.meta.outputs.build_date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          args=(
+            -t "${REGISTRY}/${IMAGE_NAME}:${version}"
+            -t "${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          )
+          if [[ "${{ steps.meta.outputs.is_prerelease }}" == "false" ]]; then
+            args+=(-t "${REGISTRY}/${IMAGE_NAME}:latest")
+          fi
+          docker buildx imagetools create "${args[@]}" localhost:5000/bc-forge-indexer:smoke
+          echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
       - name: Summarize published tags
         if: github.event_name != 'pull_request'
@@ -294,6 +358,8 @@ jobs:
             echo "- Image: \`${REGISTRY}/${IMAGE_NAME}\`"
             echo "- Version: \`${{ steps.meta.outputs.version }}\`"
             echo "- Prerelease: \`${{ steps.meta.outputs.is_prerelease }}\`"
+            echo "- Platforms: \`${PLATFORMS}\`"
             echo "- Tags: \`${{ steps.meta.outputs.tags }}\`"
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
             echo "- Vulnerability scan: fixable critical findings block this publish unless an unexpired advisory exception exists."
           } >> "$GITHUB_STEP_SUMMARY"
